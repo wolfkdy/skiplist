@@ -1,14 +1,16 @@
 #include <iostream>
 #include <cstdlib>
 #include <list>
-#include <map>
 #include <assert.h>
 #include "skiplist.h"
 
+namespace Concurrent {
 SkipListNode::SkipListNode(uint64_t key, const std::string& value, uint8_t level)
 	:key(key),
 	 value(value),
-     forward(level+1) {
+     forward(level+1),
+	 marked(false),
+	 fullyLinked(false) {
 #ifdef DEBUG
 	alive.fetch_add(1);
 #endif
@@ -52,6 +54,17 @@ uint8_t SkipList::randomLevel() const {
 	return lvl;
 }
 
+void SkipList::traverse() {
+	for (size_t i = _max_level; i >= 1; i--) {
+		SkipListNode *node = _head.get();
+		std::cout<< "level:" << i << ":";
+		while(node->forward[i]->key != std::numeric_limits<uint64_t>::max()) {
+			std::cout<< node->forward[i]->key<< ",";
+			node = node->forward[i].get();
+		}
+		std::cout << std::endl;
+	}
+}
 bool SkipList::findNode(uint64_t key, std::vector<SkipListNode*>* preds,
 		std::vector<std::shared_ptr<SkipListNode>>* succs, uint8_t* layer) {
 	SkipListNode *prev = _head.get();
@@ -65,8 +78,8 @@ bool SkipList::findNode(uint64_t key, std::vector<SkipListNode*>* preds,
 			curr = curr->forward[i];
 		}
 		if (!found && curr->key == key) {
-			found = true;
 			*layer = i;
+			found = true;
 		}
 		(*preds)[i] = prev;
 		(*succs)[i] = curr;
@@ -92,8 +105,6 @@ bool SkipList::concurrentInsert(uint64_t key, const std::string& value) {
 	uint8_t top_layer = SkipList::randomLevel();
 	std::vector<SkipListNode*> preds(_max_level+1);
 	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
-	// a list of unique_ptr wrapped lockgurad
-	std::list<std::unique_ptr<std::lock_guard<std::mutex>>> lock_guards;
 	while(true) {
 		uint8_t found_level = 0;
 		bool found = findNode(key, &preds, &succs, &found_level);
@@ -106,34 +117,39 @@ bool SkipList::concurrentInsert(uint64_t key, const std::string& value) {
 				continue;
 			}
 		}
-		SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
-		bool valid = true;
-		for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
-			pred = preds[layer];
-			succ = succs[layer].get();
-			if (pred != prevPred) {
-				lock_guards.push_back(
-					std::unique_ptr<std::lock_guard<std::mutex>>(
-						new std::lock_guard<std::mutex>(
-							pred->mutex
+		{
+			// a list of unique_ptr wrapped lockgurad
+			std::list<std::unique_ptr<std::lock_guard<std::mutex>>> lock_guards;
+
+			SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
+			bool valid = true;
+			for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
+				pred = preds[layer];
+				succ = succs[layer].get();
+				if (pred != prevPred) {
+					lock_guards.push_back(
+						std::unique_ptr<std::lock_guard<std::mutex>>(
+							new std::lock_guard<std::mutex>(
+								pred->mutex
+							)
 						)
-					)
-				);
-				prevPred = pred;
+					);
+					prevPred = pred;
+				}
+				valid = !pred->marked.load() && !succ->marked.load() && pred->forward[layer].get() == succ;
 			}
-			valid = !pred->marked.load() && !succ->marked.load() && pred->forward[layer].get() == succ;
+			if (!valid) {
+				continue;
+			}
+			auto p = SkipList::makeNode(top_layer, key, value);
+			std::shared_ptr<SkipListNode> sp = std::move(p);
+			for (uint8_t layer = 1; layer <= top_layer; ++layer) {
+				sp->forward[layer] = succs[layer];
+				preds[layer]->forward[layer] = sp;
+			}
+			sp->fullyLinked.store(true);
+			return true;
 		}
-		if (!valid) {
-			continue;
-		}
-		auto p = SkipList::makeNode(top_layer, key, value);
-		std::shared_ptr<SkipListNode> sp = std::move(p);
-		for (uint8_t layer = 1; layer <= top_layer; ++layer) {
-			p->forward[layer] = succs[layer];
-			preds[layer]->forward[layer] = sp;
-		}
-		sp->fullyLinked.store(true);
-		return true;
 	}
 }
 
@@ -256,47 +272,4 @@ bool SkipList::erase(uint64_t key) {
 	return true;
 }
 
-void atexit_handler_1() 
-{
-    std::cout << SkipListNode::alive.load() << std::endl;
-}
-
-void insert_op(SkipList *sl, std::map<std::uint64_t, std::string>* m) {
-	uint64_t key = static_cast<uint64_t>(rand() % 1000);
-	sl->insert(key, "");
-	(*m)[key] = "";
-}
-
-void delete_op(SkipList *sl, std::map<std::uint64_t, std::string>* m) {
-	uint64_t key = static_cast<uint64_t>(rand() % 1000);
-	assert((sl->erase(key)) == static_cast<bool>(m->erase(key)));
-}
-
-void find_op(SkipList *sl, std::map<std::uint64_t, std::string>* m) {
-	uint64_t key = static_cast<uint64_t>(rand() % 1000);
-	assert((sl->contains(key)) == (m->find(key) != m->end()));
-}
-
-int main() {
-	std::atexit(atexit_handler_1);
-	srand(time(NULL));
-	std::unique_ptr<SkipList> p(new SkipList(10));
-	std::map<std::uint64_t, std::string> m;
-	for (uint32_t i = 0; i < 10000000; ++i) {
-		int op = rand()%3;
-		switch(op) {
-			case 0:
-				insert_op(p.get(), &m);
-				break;
-			case 1:
-				delete_op(p.get(), &m);
-				break;
-			case 2:
-				find_op(p.get(), &m);
-				break;
-			default:
-				break;
-		}
-	}
-	return 0;
 }

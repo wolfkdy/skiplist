@@ -10,6 +10,7 @@
 
 #define DEBUG 1
 
+namespace Concurrent {
 struct SkipListNode {
 
 	SkipListNode(uint64_t key, const std::string& value, uint8_t level);
@@ -53,6 +54,8 @@ public:
 
 	uint8_t randomLevel() const;
 
+	void traverse();
+
 private:
 	const uint8_t _max_level;
 
@@ -69,5 +72,6 @@ private:
 
 	std::unique_ptr<SkipListNode> _head;
 };
+} // namespace concurrent
 
 #endif // __SKIPLIST_H__
