@@ -24,6 +24,10 @@ SkipListNode::~SkipListNode() {
 #endif
 };
 
+uint8_t SkipListNode::top_level() {
+	return forward.size() - 1;
+}
+
 std::atomic<size_t> SkipListNode::alive(0);
 
 std::unique_ptr<SkipListNode> SkipList::makeNode(uint8_t lvl,
@@ -34,15 +38,11 @@ std::unique_ptr<SkipListNode> SkipList::makeNode(uint8_t lvl,
 			lvl));
 }
 
-// head->  NilNode{INF, "", 0}  (level 4)
-//     ->  NilNode{INF, "", 0}  (level 3)
-//     ->  NilNode{INF, "", 0}  (level 2)
-//     ->  NilNode{INF, "", 0}  (level 1)
 SkipList::SkipList(uint8_t max_level)
 	:_max_level(max_level),
 	 _level(1) {
 	// key,value for headnode is meanless
-	_head = SkipList::makeNode(max_level, 0, "");
+	_head = std::move(SkipList::makeNode(max_level, 0, ""));
 	for (size_t i = 0; i <= max_level; i++) {
 		_head->forward[i] = SkipList::makeNode(0, std::numeric_limits<uint64_t>::max(), "");
 	}
@@ -69,16 +69,16 @@ void SkipList::traverse() {
 		std::cout << std::endl;
 	}
 }
-bool SkipList::findNode(uint64_t key, std::vector<SkipListNode*>* preds,
+bool SkipList::findNode(uint64_t key, std::vector<std::shared_ptr<SkipListNode>>* preds,
 		std::vector<std::shared_ptr<SkipListNode>>* succs, uint8_t* layer) {
-	SkipListNode *prev = _head.get();
+	std::shared_ptr<SkipListNode> prev = _head;
 	bool found = false;
 	assert(preds->size() >= _max_level+1);
 	assert(succs->size() >= _max_level+1);
 	for (size_t i = _max_level; i >= 1; --i) {
 		std::shared_ptr<SkipListNode> curr = prev->forward[i];
 		while (curr->key < key) {
-			prev = curr.get();
+			prev = curr;
 			curr = curr->forward[i];
 		}
 		if (!found && curr->key == key) {
@@ -107,7 +107,7 @@ bool SkipList::contains(uint64_t key) {
 
 bool SkipList::concurrentInsert(uint64_t key, const std::string& value) {
 	uint8_t top_layer = SkipList::randomLevel();
-	std::vector<SkipListNode*> preds(_max_level+1);
+	std::vector<std::shared_ptr<SkipListNode>> preds(_max_level+1);
 	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
 	while(true) {
 		uint8_t found_level = 0;
@@ -128,7 +128,7 @@ bool SkipList::concurrentInsert(uint64_t key, const std::string& value) {
 			SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
 			bool valid = true;
 			for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
-				pred = preds[layer];
+				pred = preds[layer].get();
 				succ = succs[layer].get();
 				if (pred != prevPred) {
 					lock_guards.push_back(
@@ -158,11 +158,11 @@ bool SkipList::concurrentInsert(uint64_t key, const std::string& value) {
 }
 
 bool SkipList::okToDelete(SkipListNode *node, uint8_t found_level) {
-	return (node->fullyLinked.load() && node->forward.size() == found_level && (!node->marked));
+	return (node->fullyLinked.load() && node->top_level() == found_level && (!node->marked.load()));
 }
 
 bool SkipList::concurrentContains(uint64_t key) {
-	std::vector<SkipListNode*> preds(_max_level+1);
+	std::vector<std::shared_ptr<SkipListNode>> preds(_max_level+1);
 	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
 	uint8_t found_level = 0;
 	bool found = findNode(key, &preds, &succs, &found_level);
@@ -170,7 +170,7 @@ bool SkipList::concurrentContains(uint64_t key) {
 }
 
 bool SkipList::concurrentErase(uint64_t key) {
-	std::vector<SkipListNode*> preds(_max_level+1);
+	std::vector<std::shared_ptr<SkipListNode>> preds(_max_level+1);
 	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
 	std::shared_ptr<SkipListNode> node_to_delete;
 	bool is_marked = false;
@@ -181,7 +181,7 @@ bool SkipList::concurrentErase(uint64_t key) {
 		if (is_marked || (found && okToDelete(succs[found_level].get(), found_level))) {
 			if (!is_marked) {
 				node_to_delete = succs[found_level];
-				top_layer = node_to_delete->forward.size();
+				top_layer = node_to_delete->top_level();
 				node_to_delete->mutex.lock();
 				if (node_to_delete->marked.load()) {
 					node_to_delete->mutex.unlock();
@@ -195,7 +195,7 @@ bool SkipList::concurrentErase(uint64_t key) {
 				SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
 				bool valid = true;
 				for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
-					pred = preds[layer];
+					pred = preds[layer].get();
 					succ = succs[layer].get();
 					if (pred != prevPred) {
 						lock_guards.push_back(

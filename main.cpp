@@ -9,7 +9,7 @@ using namespace Concurrent;
 
 void atexit_handler_1() 
 {
-    std::cout << SkipListNode::alive.load() << std::endl;
+    assert(SkipListNode::alive.load() == 0);
 }
 
 void insert_op(SkipList *sl, std::map<std::uint64_t, std::string>* m) {
@@ -36,6 +36,18 @@ void con_insert(SkipList *p, uint32_t start, uint32_t end) {
 	}
 }
 
+void con_contains(SkipList *p, uint32_t start, uint32_t end) {
+	for (uint32_t i = start; i < end; ++i) {
+		assert(p->concurrentContains(i));
+	}
+}
+
+void con_erase(SkipList *p, uint32_t start, uint32_t end) {
+	for (uint32_t i = start; i < end; ++i) {
+		assert(p->concurrentErase(i));
+	}
+}
+
 void nonconcurrent_test() {
 	std::unique_ptr<SkipList> p(new SkipList(10));
 	std::map<std::uint64_t, std::string> m;
@@ -58,16 +70,9 @@ void nonconcurrent_test() {
 	}
 }
 
-void con_contains(SkipList *p, uint32_t start, uint32_t end) {
-	for (uint32_t i = start; i < end; ++i) {
-		assert(p->concurrentContains(i));
-	}
-}
-
-void concurrent_insert() {
+void concurrent_insert_insert() {
 	std::unique_ptr<SkipList> p(new SkipList(20));
-	//con_insert(p.get(), 0, 100000);
-	const size_t insert_num = 1000000;
+	const size_t insert_num = 100000;
 	std::thread t1(con_insert, p.get(), 0, insert_num);
 	std::thread t2(con_insert, p.get(), insert_num, insert_num*2);
 	t1.join();
@@ -78,10 +83,9 @@ void concurrent_insert() {
 	t4.join();
 }
 
-void concurrent_insert1() {
+void concurrent_insert_contains() {
 	std::unique_ptr<SkipList> p(new SkipList(20));
-	//con_insert(p.get(), 0, 100000);
-	const size_t insert_num = 1000000;
+	const size_t insert_num = 100000;
 	std::thread t1(con_insert, p.get(), 0, insert_num);
 	t1.join();
 	std::thread t2(con_contains, p.get(), 0, insert_num);
@@ -90,9 +94,24 @@ void concurrent_insert1() {
 	t3.join();
 }
 
+void concurrent_insert_erase() {
+	std::unique_ptr<SkipList> p(new SkipList(20));
+	const size_t insert_num = 100000;
+	std::thread t1(con_insert, p.get(), 0, insert_num);
+	t1.join();
+	//p->traverse();
+	//std::cout << p->concurrentErase(0) << std::endl;
+	std::thread t2(con_erase, p.get(), 0, insert_num);
+	std::thread t3(con_insert, p.get(), insert_num, insert_num*2);
+	t2.join();
+	t3.join();
+}
+
 int main() {
 	std::atexit(atexit_handler_1);
-	concurrent_insert1();
+	concurrent_insert_insert();
+	concurrent_insert_contains();
+	concurrent_insert_erase();
 	return 0;
 }
 

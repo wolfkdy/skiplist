@@ -15,6 +15,8 @@ struct SkipListNode {
 
 	SkipListNode(uint64_t key, const std::string& value, uint8_t level);
 
+	inline uint8_t top_level();
+
 	~SkipListNode();
 
 	uint64_t key;
@@ -70,7 +72,7 @@ private:
 	// current level, not used in concurrent version
 	uint8_t _level;
 
-	bool findNode(uint64_t key, std::vector<SkipListNode*>* preds,
+	bool findNode(uint64_t key, std::vector<std::shared_ptr<SkipListNode>>* preds,
 			std::vector<std::shared_ptr<SkipListNode>>* succs, uint8_t* layer);
 
 	static std::unique_ptr<SkipListNode> makeNode(uint8_t lvl, uint64_t key,
@@ -78,7 +80,7 @@ private:
 
 	static bool okToDelete(SkipListNode *node, uint8_t found_level);
 
-	std::unique_ptr<SkipListNode> _head;
+	std::shared_ptr<SkipListNode> _head;
 };
 } // namespace concurrent
 
