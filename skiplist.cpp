@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cstdlib>
+#include <list>
 #include <map>
 #include <assert.h>
 #include "skiplist.h"
@@ -51,6 +52,28 @@ uint8_t SkipList::randomLevel() const {
 	return lvl;
 }
 
+bool SkipList::findNode(uint64_t key, std::vector<SkipListNode*>* preds,
+		std::vector<std::shared_ptr<SkipListNode>>* succs, uint8_t* layer) {
+	SkipListNode *prev = _head.get();
+	bool found = false;
+	assert(preds->size() >= _max_level+1);
+	assert(succs->size() >= _max_level+1);
+	for (size_t i = _max_level; i >= 1; --i) {
+		std::shared_ptr<SkipListNode> curr = prev->forward[i];
+		while (curr->key < key) {
+			prev = curr.get();
+			curr = curr->forward[i];
+		}
+		if (!found && curr->key == key) {
+			found = true;
+			*layer = i;
+		}
+		(*preds)[i] = prev;
+		(*succs)[i] = curr;
+	}
+	return found;
+}
+
 bool SkipList::contains(uint64_t key) {
 	SkipListNode *x = _head.get();
 	for (size_t i = _level; i >= 1; --i) {
@@ -63,6 +86,120 @@ bool SkipList::contains(uint64_t key) {
 		return true;
 	}
 	return false;
+}
+
+bool SkipList::concurrentInsert(uint64_t key, const std::string& value) {
+	uint8_t top_layer = SkipList::randomLevel();
+	std::vector<SkipListNode*> preds(_max_level+1);
+	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
+	// a list of unique_ptr wrapped lockgurad
+	std::list<std::unique_ptr<std::lock_guard<std::mutex>>> lock_guards;
+	while(true) {
+		uint8_t found_level = 0;
+		bool found = findNode(key, &preds, &succs, &found_level);
+		if (found) {
+			SkipListNode* node_found = succs[found_level].get();
+			if (!node_found->marked.load()) {
+				while(!node_found->fullyLinked.load()) {;}
+				return false;
+			} else {
+				continue;
+			}
+		}
+		SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
+		bool valid = true;
+		for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
+			pred = preds[layer];
+			succ = succs[layer].get();
+			if (pred != prevPred) {
+				lock_guards.push_back(
+					std::unique_ptr<std::lock_guard<std::mutex>>(
+						new std::lock_guard<std::mutex>(
+							pred->mutex
+						)
+					)
+				);
+				prevPred = pred;
+			}
+			valid = !pred->marked.load() && !succ->marked.load() && pred->forward[layer].get() == succ;
+		}
+		if (!valid) {
+			continue;
+		}
+		auto p = SkipList::makeNode(top_layer, key, value);
+		std::shared_ptr<SkipListNode> sp = std::move(p);
+		for (uint8_t layer = 1; layer <= top_layer; ++layer) {
+			p->forward[layer] = succs[layer];
+			preds[layer]->forward[layer] = sp;
+		}
+		sp->fullyLinked.store(true);
+		return true;
+	}
+}
+
+bool SkipList::okToDelete(SkipListNode *node, uint8_t found_level) {
+	return (node->fullyLinked.load() && node->forward.size() == found_level && (!node->marked));
+}
+
+bool SkipList::concurrentContains(uint64_t key) {
+	std::vector<SkipListNode*> preds(_max_level+1);
+	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
+	uint8_t found_level = 0;
+	bool found = findNode(key, &preds, &succs, &found_level);
+	return (found && succs[found_level]->fullyLinked.load() && !succs[found_level]->marked.load());
+}
+
+bool SkipList::concurrentErase(uint64_t key) {
+	std::vector<SkipListNode*> preds(_max_level+1);
+	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
+	std::shared_ptr<SkipListNode> node_to_delete;
+	std::list<std::unique_ptr<std::lock_guard<std::mutex>>> lock_guards;
+	bool is_marked = false;
+	int32_t top_layer = -1;
+	while(true) {
+		uint8_t found_level = 0;
+		bool found = findNode(key, &preds, &succs, &found_level);
+		if (is_marked || (found && okToDelete(succs[found_level].get(), found_level))) {
+			if (!is_marked) {
+				node_to_delete = succs[found_level];
+				top_layer = node_to_delete->forward.size();
+				node_to_delete->mutex.lock();
+				if (node_to_delete->marked.load()) {
+					node_to_delete->mutex.unlock();
+					return false;
+				}
+				node_to_delete->marked.store(true);
+				is_marked = true;
+			}
+			SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
+			bool valid = true;
+			for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
+				pred = preds[layer];
+				succ = succs[layer].get();
+				if (pred != prevPred) {
+					lock_guards.push_back(
+						std::unique_ptr<std::lock_guard<std::mutex>>(
+							new std::lock_guard<std::mutex>(
+								pred->mutex
+							)
+						)
+					);
+					prevPred = pred;
+				}
+				valid = !pred->marked && pred->forward[layer].get() == succ;
+			}
+			if (!valid) {
+				continue;
+			}
+			for (uint8_t layer = top_layer; layer >= 1; --layer) {
+				preds[layer]->forward[layer] = node_to_delete->forward[layer];
+			}
+			node_to_delete->mutex.unlock();
+			return true;
+		} else {
+			return false;
+		}
+	}
 }
 
 void SkipList::insert(uint64_t key, const std::string& value) {
@@ -83,11 +220,13 @@ void SkipList::insert(uint64_t key, const std::string& value) {
 			for (size_t i = _level+1; i <= lvl; i++) {
 				update[i] = _head.get();
 			}
+			_level = lvl;
 		}
 		auto p = SkipList::makeNode(lvl, key, value);
-		for (size_t i = 1; i <= _level; ++i) {
-			p->forward[i] = update[i]->forward[i];
-			update[i]->forward[i] = std::move(p);
+		std::shared_ptr<SkipListNode> sp = std::move(p);
+		for (size_t i = 1; i <= lvl; ++i) {
+			sp->forward[i] = update[i]->forward[i];
+			update[i]->forward[i] = sp;
 		}
 	}
 }
@@ -141,7 +280,7 @@ void find_op(SkipList *sl, std::map<std::uint64_t, std::string>* m) {
 int main() {
 	std::atexit(atexit_handler_1);
 	srand(time(NULL));
-	std::unique_ptr<SkipList> p(new SkipList(6));
+	std::unique_ptr<SkipList> p(new SkipList(10));
 	std::map<std::uint64_t, std::string> m;
 	for (uint32_t i = 0; i < 10000000; ++i) {
 		int op = rand()%3;
