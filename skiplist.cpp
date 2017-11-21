@@ -173,7 +173,6 @@ bool SkipList::concurrentErase(uint64_t key) {
 	std::vector<SkipListNode*> preds(_max_level+1);
 	std::vector<std::shared_ptr<SkipListNode>> succs(_max_level+1);
 	std::shared_ptr<SkipListNode> node_to_delete;
-	std::list<std::unique_ptr<std::lock_guard<std::mutex>>> lock_guards;
 	bool is_marked = false;
 	int32_t top_layer = -1;
 	while(true) {
@@ -191,31 +190,34 @@ bool SkipList::concurrentErase(uint64_t key) {
 				node_to_delete->marked.store(true);
 				is_marked = true;
 			}
-			SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
-			bool valid = true;
-			for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
-				pred = preds[layer];
-				succ = succs[layer].get();
-				if (pred != prevPred) {
-					lock_guards.push_back(
-						std::unique_ptr<std::lock_guard<std::mutex>>(
-							new std::lock_guard<std::mutex>(
-								pred->mutex
+			{
+				std::list<std::unique_ptr<std::lock_guard<std::mutex>>> lock_guards;
+				SkipListNode *pred = nullptr, *succ = nullptr, *prevPred = nullptr;
+				bool valid = true;
+				for (uint8_t layer = 1; valid && layer <= top_layer; ++layer) {
+					pred = preds[layer];
+					succ = succs[layer].get();
+					if (pred != prevPred) {
+						lock_guards.push_back(
+							std::unique_ptr<std::lock_guard<std::mutex>>(
+								new std::lock_guard<std::mutex>(
+									pred->mutex
+								)
 							)
-						)
-					);
-					prevPred = pred;
+						);
+						prevPred = pred;
+					}
+					valid = !pred->marked && pred->forward[layer].get() == succ;
 				}
-				valid = !pred->marked && pred->forward[layer].get() == succ;
+				if (!valid) {
+					continue;
+				}
+				for (uint8_t layer = top_layer; layer >= 1; --layer) {
+					preds[layer]->forward[layer] = node_to_delete->forward[layer];
+				}
+				node_to_delete->mutex.unlock();
+				return true;
 			}
-			if (!valid) {
-				continue;
-			}
-			for (uint8_t layer = top_layer; layer >= 1; --layer) {
-				preds[layer]->forward[layer] = node_to_delete->forward[layer];
-			}
-			node_to_delete->mutex.unlock();
-			return true;
 		} else {
 			return false;
 		}
