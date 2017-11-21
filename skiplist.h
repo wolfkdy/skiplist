@@ -40,20 +40,28 @@ public:
 
 	SkipList(uint8_t max_height);
 
+	// thread-unsafe
 	void insert(uint64_t key, const std::string& value);
 
-	bool concurrentInsert(uint64_t key, const std::string& value);
-
-	bool concurrentErase(uint64_t key);
-
-	bool concurrentContains(uint64_t key);
-
+	// thread-unsafe
 	bool erase(uint64_t key);
 
+	// thread-unsafe
 	bool contains(uint64_t key); 
 
+	// thread-safe
+	bool concurrentInsert(uint64_t key, const std::string& value);
+
+	// thread-safe
+	bool concurrentErase(uint64_t key);
+
+	// thread-safe
+	bool concurrentContains(uint64_t key);
+
+	// thread-safe
 	uint8_t randomLevel() const;
 
+	// for debug
 	void traverse();
 
 private:

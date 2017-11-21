@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <list>
 #include <assert.h>
+#include <random>
+#include <chrono>
 #include "skiplist.h"
 
 namespace Concurrent {
@@ -47,8 +49,10 @@ SkipList::SkipList(uint8_t max_level)
 }
 
 uint8_t SkipList::randomLevel() const {
+	static thread_local std::mt19937 generator(std::chrono::system_clock::now().time_since_epoch().count());
+    std::uniform_int_distribution<int> distribution(0,1);
 	uint8_t lvl = 1;
-	while(rand() % 2 && lvl < _max_level) {
+	while(distribution(generator) && lvl < _max_level) {
 		++lvl;
 	}
 	return lvl;
